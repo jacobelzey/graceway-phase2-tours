@@ -1,0 +1,11 @@
+{
+  "name": "graceway-phase2-tours",
+  "private": true,
+  "description": "Graceway Phase 2 360 tours",
+  "scripts": {
+    "test": "node --test tests/**/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
