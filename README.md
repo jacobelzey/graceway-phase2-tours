@@ -54,11 +54,23 @@ python3 -m http.server 8080
   tiles/        # cubemap tile pyramid per scene id
   img/          # UI icons (link, info, fullscreen, etc.)
   vendor/       # marzipano.js, bowser, screenfull, reset CSS
+
+lib/            # Node helpers for integrity checks (not used by the browser)
+tests/          # node:test suites — run with npm test
+package.json    # test script only (no dependencies)
 ```
 
-See [docs/developer-guide.md](docs/developer-guide.md) for architecture, `APP_DATA` fields, how to add a month, and troubleshooting.
+See [docs/developer-guide.md](docs/developer-guide.md) for architecture, `APP_DATA` fields, integrity checks, how to add a month, and troubleshooting.
+
+## Verify before publishing
+
+```bash
+npm test   # Node ≥ 18; no npm install required
+```
+
+Checks scene/hotspot/HTML/tile consistency and that shared `index.js` has not drifted across month folders.
 
 ## Documentation
 
-- [Developer guide](docs/developer-guide.md) — architecture, workflows, pitfalls
-- Stock Marzipano note in `january-2026/README.txt` (historical; prefer the docs above)
+- [Developer guide](docs/developer-guide.md) — architecture, workflows, testing, pitfalls
+- `january-2026/README.txt` — short per-folder pointer to the docs above

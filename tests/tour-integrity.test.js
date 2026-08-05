@@ -14,9 +14,13 @@ const {
   missingRequiredFiles,
   missingRequiredHtmlElementIds,
   settingsChromeMismatches,
+  tilesPerSide,
+  missingCubeTiles,
+  reachableSceneIds,
   REQUIRED_VENDOR_FILES,
   REQUIRED_IMG_FILES,
-  REQUIRED_HTML_ELEMENT_IDS
+  REQUIRED_HTML_ELEMENT_IDS,
+  CUBE_FACES
 } = require('../lib/tour-integrity');
 
 const REPO_ROOT = path.join(__dirname, '..');
@@ -65,6 +69,20 @@ function writeMinimalTour(tmp, overrides = {}) {
   }
   fs.mkdirSync(path.join(tmp, 'tiles', scene.id), { recursive: true });
   fs.writeFileSync(path.join(tmp, 'tiles', scene.id, 'preview.jpg'), 'x');
+  // Minimal valid LOD grids so packaging tests do not trip cube-tile checks.
+  for (const [z, level] of (scene.levels || []).entries()) {
+    if (!level || level.fallbackOnly) continue;
+    const side = Math.ceil(level.size / level.tileSize);
+    for (const face of CUBE_FACES) {
+      for (let y = 0; y < side; y += 1) {
+        for (let x = 0; x < side; x += 1) {
+          const dir = path.join(tmp, 'tiles', scene.id, String(z), face, String(y));
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(path.join(dir, `${x}.jpg`), 'x');
+        }
+      }
+    }
+  }
   return tmp;
 }
 
@@ -162,6 +180,51 @@ describe('required packaging assets', () => {
   });
 });
 
+describe('cube tile grid helpers', () => {
+  it('computes tiles-per-side from Marzipano level size/tileSize', () => {
+    assert.equal(tilesPerSide({ size: 512, tileSize: 512 }), 1);
+    assert.equal(tilesPerSide({ size: 1024, tileSize: 512 }), 2);
+    assert.equal(tilesPerSide({ size: 4096, tileSize: 512 }), 8);
+    assert.equal(tilesPerSide({ size: 256, tileSize: 0 }), null);
+  });
+
+  it('reports missing face tiles for incomplete LODs', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tiles-'));
+    const scene = {
+      id: 'room',
+      levels: [
+        { tileSize: 256, size: 256, fallbackOnly: true },
+        { tileSize: 512, size: 512 }
+      ]
+    };
+    // Only create one face tile at z=1.
+    fs.mkdirSync(path.join(tmp, 'tiles', 'room', '1', 'f', '0'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, 'tiles', 'room', '1', 'f', '0', '0.jpg'), 'x');
+
+    const missing = missingCubeTiles(tmp, scene);
+    assert.ok(missing.includes('room/1/b/0/0.jpg'));
+    assert.equal(missing.includes('room/1/f/0/0.jpg'), false);
+    // fallbackOnly level 0 is intentionally skipped.
+    assert.equal(
+      missing.some((entry) => entry.startsWith('room/0/')),
+      false
+    );
+  });
+});
+
+describe('hotspot navigation graph', () => {
+  it('returns scenes reachable by following link hotspot targets', () => {
+    const scenes = [
+      { id: 'a', linkHotspots: [{ target: 'b' }] },
+      { id: 'b', linkHotspots: [{ target: 'c' }] },
+      { id: 'c', linkHotspots: [] },
+      { id: 'orphan', linkHotspots: [] }
+    ];
+    assert.deepEqual([...reachableSceneIds(scenes, 'a')].sort(), ['a', 'b', 'c']);
+    assert.deepEqual([...reachableSceneIds(scenes, 'orphan')], ['orphan']);
+  });
+});
+
 describe('tour data integrity', () => {
   for (const tour of listTourDirectories(REPO_ROOT)) {
     it(`${tour}: scenes, hotspots, HTML list, tiles, and packaging stay consistent`, () => {
@@ -191,6 +254,20 @@ describe('tour data integrity', () => {
       const tourDir = path.join(REPO_ROOT, tour);
       assert.deepEqual(missingRequiredFiles(tourDir, REQUIRED_VENDOR_FILES), []);
       assert.deepEqual(missingRequiredFiles(tourDir, REQUIRED_IMG_FILES), []);
+    });
+
+    it(`${tour}: every scene is reachable via link hotspots from the start scene`, () => {
+      const appData = loadAppData(path.join(REPO_ROOT, tour));
+      const startId = appData.scenes[0].id;
+      const reachable = reachableSceneIds(appData.scenes, startId);
+      const unreachable = appData.scenes
+        .map((scene) => scene.id)
+        .filter((id) => !reachable.has(id));
+      assert.deepEqual(
+        unreachable,
+        [],
+        `${tour}: scenes unreachable from ${startId} via hotspots: ${unreachable.join(', ')}`
+      );
     });
   }
 });
@@ -257,6 +334,30 @@ describe('validateTourPackage failure modes', () => {
     );
     assert.ok(
       result.errors.some((error) => error.includes('lists unknown scene id "not-a"')),
+      result.errors.join('; ')
+    );
+  });
+
+  it('reports missing cube face tiles beyond preview.jpg', () => {
+    const tmp = writeMinimalTour(fs.mkdtempSync(path.join(os.tmpdir(), 'tour-')));
+    // Delete one face tile that preview-only checks would miss.
+    fs.unlinkSync(path.join(tmp, 'tiles', 'a', '0', 'u', '0', '0.jpg'));
+
+    const result = validateTourPackage(tmp);
+    assert.ok(
+      result.errors.some((error) => error.includes('missing cube tile a/0/u/0/0.jpg')),
+      result.errors.join('; ')
+    );
+  });
+
+  it('reports invalid mouseViewMode settings', () => {
+    const tmp = writeMinimalTour(fs.mkdtempSync(path.join(os.tmpdir(), 'tour-')), {
+      appData: { settings: { mouseViewMode: 'wasd', autorotateEnabled: true, fullscreenButton: true, viewControlButtons: true } }
+    });
+
+    const result = validateTourPackage(tmp);
+    assert.ok(
+      result.errors.some((error) => error.includes('mouseViewMode must be one of')),
       result.errors.join('; ')
     );
   });

@@ -29,7 +29,16 @@ Runtime flow (`index.js`):
 5. Wire scene list, autorotate, fullscreen, and on-screen view controls.
 6. Start on `scenes[0]`.
 
-`index.js` and `style.css` are currently **byte-identical** across all month folders. Tour-specific content lives in `data.js`, `index.html` (scene list markup + `<title>`), and `tiles/`.
+`index.js` and `style.css` are currently **byte-identical** across all month folders (enforced by `npm test`). Tour-specific content lives in `data.js`, `index.html` (scene list markup + `<title>`), and `tiles/`.
+
+Repo-level helpers (not shipped to Pages browsers; used by Node tests):
+
+| Path | Role |
+|------|------|
+| `lib/tour-integrity.js` | Discover month folders, evaluate `data.js`, validate package consistency |
+| `lib/player-helpers.js` | Pure copies of player lookup/escape helpers for regression tests |
+| `tests/*.test.js` | Integrity + helper suites (`node --test`) |
+| `package.json` | `npm test` script; requires Node ≥ 18; no npm dependencies |
 
 ## Public interface: `APP_DATA` (`data.js`)
 
@@ -37,7 +46,7 @@ Runtime flow (`index.js`):
 var APP_DATA = {
   name: "june-2026",          // tour display name (also used as project title in tool export)
   settings: {
-    mouseViewMode: "drag",    // passed to Viewer controls
+    mouseViewMode: "drag",    // "drag" | "qtvr" — passed to Viewer controls
     autorotateEnabled: true,  // initial autorotate toggle state
     fullscreenButton: true,   // hide fullscreen UI if false / unsupported
     viewControlButtons: true  // body gets class view-control-buttons from HTML
@@ -45,6 +54,8 @@ var APP_DATA = {
   scenes: [ /* ... */ ]
 };
 ```
+
+`settings.mouseViewMode` must be `"drag"` or `"qtvr"` (Marzipano viewer modes). Integrity checks reject anything else.
 
 ### Scene object
 
@@ -115,6 +126,8 @@ Prefer exporting a new tour from the [Marzipano Tool](https://www.marzipano.net/
    - Every `scenes[].id` has `tiles/<id>/` with `preview.jpg`.
    - Every scene has a matching `data-id` row in `index.html`.
    - Every `linkHotspots[].target` resolves to an existing scene id.
+   - Folder name matches `<word>-<yyyy>` (e.g. `july-2026`) so `listTourDirectories` discovers it.
+   - Run `npm test` from the repo root (see [Testing](#testing--tour-integrity)).
    - Local HTTP preview: scene list, hotspots, autorotate, fullscreen.
 6. **Document** the new row in the root [README.md](../README.md) tour table.
 7. **Deploy** by merging to `main` (GitHub Pages source: `main` `/`).
@@ -135,6 +148,65 @@ Risky / avoid casually:
 - Partial tile uploads (missing LODs).
 - Diverging one folder’s `index.js` / `style.css` unless you intend a one-off fork — today they are shared copies.
 
+## Testing / tour integrity
+
+Intent: catch navigation data bugs (broken hotspot targets, HTML/`data.js` drift, missing tile folders, shared `index.js` forks) before publish. These checks mirror failure modes in `index.js` — e.g. `createLinkHotspotElement` does `findSceneDataById(hotspot.target).name`, which throws if `target` is unknown.
+
+### Run
+
+```bash
+# from repo root — Node ≥ 18, no install step
+npm test
+```
+
+Equivalent: `node --test tests/**/*.test.js`.
+
+### What the suite covers
+
+| Check | Source |
+|-------|--------|
+| Discovers all `<month>-<yyyy>` tour dirs | `listTourDirectories` (`^\w+-\d{4}$`) |
+| `index.js` byte-identical across tours | SHA-256 compare in `tests/tour-integrity.test.js` |
+| Per-tour package validation | `validateTourPackage` |
+| Hotspot targets resolve | Asserted per tour + in validator |
+| Player `sanitize` / scene lookup parity | `lib/player-helpers.js` vs `january-2026/index.js` |
+
+### `validateTourPackage(tourDir)` contract
+
+Returns `{ tourDir, errors, sceneCount? }`. Empty `errors` means the package is consistent enough for the player. It reports (non-exhaustive):
+
+- Missing `data.js` / `index.html` / `index.js`
+- Invalid or empty `APP_DATA.scenes` / `settings`
+- Duplicate or empty scene ids; missing `name`, `faceSize`, `levels`, `initialViewParameters`
+- Missing `tiles/<id>/` or `preview.jpg`
+- Link hotspot non-numeric yaw/pitch/rotation or unknown `target`
+- Info hotspot non-numeric yaw/pitch or non-string `title`/`text`
+- `index.html` `#sceneList` `data-id` values missing, unknown, or duplicated
+
+Example (programmatic):
+
+```js
+const path = require('path');
+const { validateTourPackage, listTourDirectories } = require('./lib/tour-integrity');
+
+for (const tour of listTourDirectories(__dirname)) {
+  const { errors } = validateTourPackage(path.join(__dirname, tour));
+  if (errors.length) console.error(tour, errors);
+}
+```
+
+### Player helpers (`lib/player-helpers.js`)
+
+Exported for tests only; behavior matches the inlined functions in each tour’s `index.js`:
+
+| Helper | Behavior / constraint |
+|--------|------------------------|
+| `sanitize(s)` | Escapes **first** `&`, `<`, `>` only (Marzipano-generated quirk — not a full HTML escaper) |
+| `findSceneDataById(list, id)` | Linear search on `APP_DATA.scenes`; returns `null` if missing |
+| `findSceneById(scenes, id)` | Linear search on wrapped `{ data, scene }` objects used by `switchScene` |
+
+Do not “fix” `sanitize` in `lib/` alone — change the player `index.js` copies together (or accept the drift test failing until both match).
+
 ## Deployment / operations
 
 | Item | Value |
@@ -144,7 +216,7 @@ Risky / avoid casually:
 | Public URL | `https://jacobelzey.github.io/graceway-phase2-tours/<folder>/` |
 | Custom domain | Previously `tours.elzey.pw` via root `CNAME`; file removed — DNS/Pages custom domain may need separate cleanup if still configured outside the repo |
 
-No CI, package manager, or bundler. A Pages build publishes the static tree as-is.
+No CI or bundler. `package.json` exists only for the local `npm test` entrypoint (zero dependencies). A Pages build publishes the static tree as-is; `lib/` and `tests/` are unused by the browser tours.
 
 Operational checks after publish:
 
@@ -167,8 +239,11 @@ Operational checks after publish:
 
 ## Common pitfalls
 
-- **Stock Marzipano README** in `january-2026/README.txt` mentions an `app-files/` wrapper that this repo does **not** use — tour files live at the folder root.
-- **Scene list vs data drift** — regenerating only `data.js` without updating `index.html` (or vice versa) breaks startup.
+- **Stock Marzipano README** in `january-2026/README.txt` points at the developer guide (older Marzipano exports used an `app-files/` wrapper this repo does **not** use — tour files live at the folder root).
+- **Scene list vs data drift** — regenerating only `data.js` without updating `index.html` (or vice versa) breaks startup; `npm test` catches this.
+- **Broken link targets** — unknown `target` ids crash hotspot creation (`findSceneDataById(...).name`), not merely skip navigation.
 - **ID renames** — May vs June reused human labels (Lobby 1, …) but different id strings and ordering; copy-pasting hotspots across months without remapping targets will mis-route.
+- **Folder naming** — only directories matching `\w+-\d{4}` (e.g. `july-2026`) are discovered by tests. `april-2026` is absent today; adding it requires that naming shape.
+- **`APP_DATA.name` defaults** — older exports still say tool placeholders (`Graceway-Construction-December`, `Project Title`); newer months use the folder label. Prefer aligning `name` + `<title>` with the folder when exporting.
 - **Info hotspots** — supported by `index.js` but unused in current exports; `text`/`title` are assigned with `innerHTML`.
 - **`.DS_Store`** — macOS metadata has been committed before; prefer omitting it from new tours.
