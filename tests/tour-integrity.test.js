@@ -11,6 +11,11 @@ const {
   validateTourPackage,
   loadAppData,
   extractHtmlSceneIds,
+  extractScriptSrcs,
+  extractStylesheetHrefs,
+  bootResourceErrors,
+  hasTitleBarSceneName,
+  isCssAttributeSafeSceneId,
   missingRequiredFiles,
   missingRequiredHtmlElementIds,
   settingsChromeMismatches,
@@ -20,10 +25,34 @@ const {
   REQUIRED_VENDOR_FILES,
   REQUIRED_IMG_FILES,
   REQUIRED_HTML_ELEMENT_IDS,
+  REQUIRED_BOOT_SCRIPTS,
+  REQUIRED_STYLESHEETS,
   CUBE_FACES
 } = require('../lib/tour-integrity');
 
 const REPO_ROOT = path.join(__dirname, '..');
+
+function defaultShellHtml(sceneId = 'a') {
+  return [
+    '<link rel="stylesheet" href="vendor/reset.min.css">',
+    '<link rel="stylesheet" href="style.css">',
+    '<body class="multiple-scenes view-control-buttons">',
+    '<div id="pano"></div>',
+    '<div id="titleBar"><span class="sceneName"></span></div>',
+    `<div id="sceneList"><a href="javascript:void(0)" class="scene" data-id="${sceneId}"><li class="text">A</li></a></div>`,
+    '<a id="sceneListToggle"></a>',
+    '<a id="autorotateToggle"></a>',
+    '<a id="fullscreenToggle"></a>',
+    '<a id="viewUp"></a><a id="viewDown"></a><a id="viewLeft"></a>',
+    '<a id="viewRight"></a><a id="viewIn"></a><a id="viewOut"></a>',
+    '<script src="vendor/screenfull.min.js"></script>',
+    '<script src="vendor/bowser.min.js"></script>',
+    '<script src="vendor/marzipano.js"></script>',
+    '<script src="data.js"></script>',
+    '<script src="index.js"></script>',
+    '</body>'
+  ].join('\n');
+}
 
 function writeMinimalTour(tmp, overrides = {}) {
   const scene = {
@@ -46,20 +75,7 @@ function writeMinimalTour(tmp, overrides = {}) {
   }
 
   fs.writeFileSync(path.join(tmp, 'data.js'), `var APP_DATA = ${JSON.stringify(appData)};`);
-  fs.writeFileSync(
-    path.join(tmp, 'index.html'),
-    overrides.html ||
-      [
-        '<div id="pano"></div>',
-        '<div id="titleBar"><span class="sceneName"></span></div>',
-        '<div id="sceneList"><a href="javascript:void(0)" class="scene" data-id="a"><li class="text">A</li></a></div>',
-        '<a id="sceneListToggle"></a>',
-        '<a id="autorotateToggle"></a>',
-        '<a id="fullscreenToggle"></a>',
-        '<a id="viewUp"></a><a id="viewDown"></a><a id="viewLeft"></a>',
-        '<a id="viewRight"></a><a id="viewIn"></a><a id="viewOut"></a>'
-      ].join('\n')
-  );
+  fs.writeFileSync(path.join(tmp, 'index.html'), overrides.html || defaultShellHtml(scene.id));
   fs.writeFileSync(path.join(tmp, 'index.js'), '// stub');
   fs.writeFileSync(path.join(tmp, 'style.css'), '/* stub */');
   for (const relativePath of [...REQUIRED_VENDOR_FILES, ...REQUIRED_IMG_FILES]) {
@@ -123,6 +139,20 @@ describe('shared player asset drift', () => {
       `style.css drifted across tours: ${JSON.stringify(Object.fromEntries(tours.map((t, i) => [t, hashes[i]])))}`
     );
   });
+
+  it('keeps vendor boot scripts byte-identical across all tours', () => {
+    const tours = listTourDirectories(REPO_ROOT);
+    for (const relativePath of REQUIRED_VENDOR_FILES) {
+      const hashes = tours.map((tour) => {
+        const bytes = fs.readFileSync(path.join(REPO_ROOT, tour, relativePath));
+        return crypto.createHash('sha256').update(bytes).digest('hex');
+      });
+      assert.ok(
+        hashes.every((hash) => hash === hashes[0]),
+        `${relativePath} drifted across tours: ${JSON.stringify(Object.fromEntries(tours.map((t, i) => [t, hashes[i]])))}`
+      );
+    }
+  });
 });
 
 describe('HTML scene list parsing', () => {
@@ -134,6 +164,53 @@ describe('HTML scene list parsing', () => {
       "<a class='scene' data-id='third'></a>"
     ].join('\n');
     assert.deepEqual(extractHtmlSceneIds(html), ['first', 'second', 'third']);
+  });
+});
+
+describe('HTML boot resource contract', () => {
+  it('extracts script src and stylesheet href values', () => {
+    const html = [
+      '<link rel="stylesheet" href="vendor/reset.min.css">',
+      '<link href="style.css" rel="stylesheet">',
+      '<script src="vendor/marzipano.js"></script>',
+      '<script src="data.js"></script>',
+      '<script src="index.js"></script>'
+    ].join('\n');
+    assert.deepEqual(extractStylesheetHrefs(html), ['vendor/reset.min.css', 'style.css']);
+    assert.deepEqual(extractScriptSrcs(html), ['vendor/marzipano.js', 'data.js', 'index.js']);
+  });
+
+  it('requires vendor/data scripts before index.js and stylesheets present', () => {
+    assert.ok(REQUIRED_BOOT_SCRIPTS.includes('data.js'));
+    assert.ok(REQUIRED_STYLESHEETS.includes('style.css'));
+
+    const good = defaultShellHtml();
+    assert.deepEqual(bootResourceErrors(good), []);
+
+    const badOrder = good.replace(
+      '<script src="data.js"></script>\n<script src="index.js"></script>',
+      '<script src="index.js"></script>\n<script src="data.js"></script>'
+    );
+    assert.ok(bootResourceErrors(badOrder).some((error) => error.includes('data.js before index.js')));
+
+    const missingMarzipano = good.replace('<script src="vendor/marzipano.js"></script>\n', '');
+    assert.ok(
+      bootResourceErrors(missingMarzipano).some((error) =>
+        error.includes('missing boot script vendor/marzipano.js')
+      )
+    );
+  });
+
+  it('requires #titleBar .sceneName for updateSceneName', () => {
+    assert.equal(hasTitleBarSceneName(defaultShellHtml()), true);
+    assert.equal(hasTitleBarSceneName('<div id="titleBar"></div>'), false);
+    assert.equal(hasTitleBarSceneName('<span class="sceneName"></span>'), false);
+  });
+
+  it('rejects scene ids that break CSS attribute selectors in index.js', () => {
+    assert.equal(isCssAttributeSafeSceneId('0-lobby-entrance'), true);
+    assert.equal(isCssAttributeSafeSceneId('bad id'), false);
+    assert.equal(isCssAttributeSafeSceneId('quote"id'), false);
   });
 });
 
@@ -177,6 +254,7 @@ describe('required packaging assets', () => {
     );
     assert.ok(mismatches.some((message) => message.includes('#fullscreenToggle')));
     assert.ok(mismatches.some((message) => message.includes('#viewUp')));
+    assert.ok(mismatches.some((message) => message.includes('view-control-buttons')));
   });
 });
 
@@ -305,7 +383,18 @@ describe('validateTourPackage failure modes', () => {
 
   it('reports missing player shell element ids', () => {
     const tmp = writeMinimalTour(fs.mkdtempSync(path.join(os.tmpdir(), 'tour-')), {
-      html: '<div id="pano"></div><div id="sceneList"><a class="scene" data-id="a"></a></div>'
+      html: [
+        '<link rel="stylesheet" href="vendor/reset.min.css">',
+        '<link rel="stylesheet" href="style.css">',
+        '<body class="multiple-scenes view-control-buttons">',
+        '<div id="pano"></div><div id="sceneList"><a class="scene" data-id="a"></a></div>',
+        '<script src="vendor/screenfull.min.js"></script>',
+        '<script src="vendor/bowser.min.js"></script>',
+        '<script src="vendor/marzipano.js"></script>',
+        '<script src="data.js"></script>',
+        '<script src="index.js"></script>',
+        '</body>'
+      ].join('\n')
     });
 
     const result = validateTourPackage(tmp);
@@ -313,18 +402,15 @@ describe('validateTourPackage failure modes', () => {
       result.errors.some((error) => error.includes('missing required element id="titleBar"')),
       result.errors.join('; ')
     );
+    assert.ok(
+      result.errors.some((error) => error.includes('missing #titleBar .sceneName')),
+      result.errors.join('; ')
+    );
   });
 
   it('reports HTML scene list / data.js drift', () => {
     const tmp = writeMinimalTour(fs.mkdtempSync(path.join(os.tmpdir(), 'tour-')), {
-      html: [
-        '<div id="pano"></div>',
-        '<div id="titleBar"></div>',
-        '<div id="sceneList"><a class="scene" data-id="not-a"></a></div>',
-        '<a id="sceneListToggle"></a><a id="autorotateToggle"></a><a id="fullscreenToggle"></a>',
-        '<a id="viewUp"></a><a id="viewDown"></a><a id="viewLeft"></a>',
-        '<a id="viewRight"></a><a id="viewIn"></a><a id="viewOut"></a>'
-      ].join('\n')
+      html: defaultShellHtml().replace('data-id="a"', 'data-id="not-a"')
     });
 
     const result = validateTourPackage(tmp);
@@ -358,6 +444,62 @@ describe('validateTourPackage failure modes', () => {
     const result = validateTourPackage(tmp);
     assert.ok(
       result.errors.some((error) => error.includes('mouseViewMode must be one of')),
+      result.errors.join('; ')
+    );
+  });
+
+  it('reports boot script order / missing stylesheet regressions', () => {
+    const tmp = writeMinimalTour(fs.mkdtempSync(path.join(os.tmpdir(), 'tour-')), {
+      html: defaultShellHtml()
+        .replace('<link rel="stylesheet" href="style.css">\n', '')
+        .replace(
+          '<script src="data.js"></script>\n<script src="index.js"></script>',
+          '<script src="index.js"></script>\n<script src="data.js"></script>'
+        )
+    });
+
+    const result = validateTourPackage(tmp);
+    assert.ok(
+      result.errors.some((error) => error.includes('missing stylesheet style.css')),
+      result.errors.join('; ')
+    );
+    assert.ok(
+      result.errors.some((error) => error.includes('data.js before index.js')),
+      result.errors.join('; ')
+    );
+  });
+
+  it('reports CSS-unsafe scene ids that would break scene list querySelector', () => {
+    const unsafeId = 'bad id';
+    const tmp = writeMinimalTour(fs.mkdtempSync(path.join(os.tmpdir(), 'tour-')), {
+      scene: { id: unsafeId },
+      html: defaultShellHtml(unsafeId)
+    });
+    // Tile dirs use the unsafe id from scene override.
+    fs.mkdirSync(path.join(tmp, 'tiles', unsafeId), { recursive: true });
+    fs.writeFileSync(path.join(tmp, 'tiles', unsafeId, 'preview.jpg'), 'x');
+    fs.mkdirSync(path.join(tmp, 'tiles', unsafeId, '0', 'f', '0'), { recursive: true });
+    for (const face of CUBE_FACES) {
+      const dir = path.join(tmp, 'tiles', unsafeId, '0', face, '0');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, '0.jpg'), 'x');
+    }
+
+    const result = validateTourPackage(tmp);
+    assert.ok(
+      result.errors.some((error) => error.includes('unsafe for CSS attribute selectors')),
+      result.errors.join('; ')
+    );
+  });
+
+  it('reports missing body view-control-buttons class when settings enable controls', () => {
+    const tmp = writeMinimalTour(fs.mkdtempSync(path.join(os.tmpdir(), 'tour-')), {
+      html: defaultShellHtml().replace('multiple-scenes view-control-buttons', 'multiple-scenes')
+    });
+
+    const result = validateTourPackage(tmp);
+    assert.ok(
+      result.errors.some((error) => error.includes('lacks class view-control-buttons')),
       result.errors.join('; ')
     );
   });
